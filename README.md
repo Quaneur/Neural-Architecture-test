@@ -1,6 +1,6 @@
 # Neural-Architecture-test
 
-Just simple test library of neural architecture with dynamic weights on Python
+Just simple test library of neural architecture with dynamic weights on Python (Still in work)
 
 `Connections.py` - The Connection class file.
 
