@@ -17,6 +17,11 @@ struct neuron {
 	float state;
 	unsigned short c;
 };
+
+struct INFO_D {
+	unsigned int offset;
+	unsigned short count;
+};
 // Random UINT64 generator
 unsigned long random(unsigned long seed) {
 	unsigned long result = (seed + 0x9E3779B97F4A7C15);
@@ -52,7 +57,7 @@ static float relu(float x, float c) {
 };
 
 static float sigmoid(float x, float c) {
-	return 1.0f/(1.0f+exp(-x/log(c)));
+	return 1.0f/(1.0f+exp(-x));
 };
 
 // KERNEL SECTOR
@@ -83,6 +88,18 @@ __kernel void MutateN(__global struct neuron* ners, const unsigned long seed, co
 	return;
 }
 
+__kernel void ResetC(__global struct connection* cons) {
+	unsigned int i = get_global_id(0);
+	cons[i].mult = cons[i].init_mult;
+	cons[i].acc = 0.0f;
+}
+__kernel void ResetN(__global struct neuron* ners) {
+	unsigned short i = get_global_id(0);
+	ners[i].state = 0.0f;
+	ners[i].in_d = 0.0f;
+	ners[i].c = 0;
+}
+
 __kernel void Update1(__global struct connection* cons, __global struct neuron* ners, __global float* prestate) {
 	// Step 1 - Set neurons input prestates and first update of connections.
 	unsigned long i = get_global_id(0);
@@ -91,23 +108,18 @@ __kernel void Update1(__global struct connection* cons, __global struct neuron* 
 	cons[i].acc = cons[i].acc * cons[i].accoof + ners[c.b_id].state * 0.1f;
 };
 
-__kernel void Update2(__global float* prestate, __global unsigned short* compute_counts, __global struct neuron* ners) {
+__kernel void Update2(__global float* prestate, __global struct INFO_D* c_c, __global struct neuron* ners) {
 	//Step 2 - Neuron's input summary
 	unsigned short i = get_global_id(0);
-	unsigned long offset;
-	__local unsigned short check;
-	offset = 0;
-	check = 0;
-	for (unsigned short j = 0; j < i; j++) { // Getting data offset
-		offset += compute_counts[j];
-		check++;
-	}
-	//printf("core_%u: offset:%u steps:%u\n", i, offset, check);
+	//printf("core_%u: offset:%u\n", i, compute_counts[i].offset);
 	float out = 0.0f;
-	for (unsigned short q = 0; q < compute_counts[i]; q++) {
-		out += prestate[offset + q]; // Computing neuron in_d
+	for (unsigned short q = 0; q < c_c[i].count; q++) {
+		out += prestate[c_c[i].offset+q]; // Computing neuron in_d
 	}
+	//printf("core_%u -> out sum: %f.2\n", i, out);
 	ners[i].in_d = out;
+	ners[i].c = c_c[i].count;
+	//printf("core_%u -> ners[%u] = (%f3.3, %u); offset: %u, count: %u\n", i, i, ners[i].in_d, ners[i].c, c_c[i].offset, c_c[i].count);
 }
 
 __kernel void Update3(__global struct neuron* ners) {
@@ -118,6 +130,7 @@ __kernel void Update3(__global struct neuron* ners) {
 		goto end;
 	}
 	unsigned char tp = (unsigned char)(n.cdata>>2)&15;
+	//printf("core_%u: n_type:%u\n", i, tp);
 	switch (tp) {
 	case 0:
 		ners[i].state = linear(n.in_d, n.c);
@@ -132,6 +145,7 @@ __kernel void Update3(__global struct neuron* ners) {
 		ners[i].state = sigmoid(n.in_d, n.c);
 		break;
 	}
+	//printf("core_%u: result_state: %f\n", i, ners[i].state);
 	end:
 	ners[i].in_d = 0.0f;
 	ners[i].c = 0;
@@ -153,7 +167,7 @@ __kernel void GenRand(__global float* rt, const ulong seed) {
 	unsigned long long i = get_global_id(0);
 	//unsigned long long s_s = seed + (j + j ^ (j << 4)); //pseudo-randomizing seed before random function
 	unsigned long long rgn1 = random(seed+i);
-	float r1 = ((float)rgn1) / ((float)maxui);//((float)rgn1) / ((float)maxui); //Normalizing to float number from 0.0f to 1.0f
-	rt[i] = r1;
+	float r1 = ((float)rgn1) / ((float)maxui);//Normalizing to float number from 0.0f to 1.0f
+	rt[i] = sigmoid((r1*2.f-1.f)*20.f, 0);
 
 }

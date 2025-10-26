@@ -7,7 +7,7 @@ try:
     import os
     os.environ["PYOPENCL_CTX"] = "0"
     os.environ["PYOPENCL_COMPILER_OUTPUT"] = "1"
-    os.environ["PYOPENCL_NO_CASHE"] = "y"
+    os.environ["PYOPENCL_NO_CASHE"] = "1"
     del os
     import numpy as np
     import pyopencl as cl
@@ -301,9 +301,10 @@ if _GPUACCEL:
             connections = []
             input_n = []
             output_n = []
-            info_table = []
+            info_table = b""
             neur_c = neur_c+1
             outputs = outputs+1
+            counter = [0 for _ in range(neur_c)]
             for i in range(neur_c):
                 n = Neuron()
                 n.act_funct = act_funct
@@ -316,13 +317,19 @@ if _GPUACCEL:
                 n.act_funct = sigmoid
                 n.id = i
                 neurons.append(n)
-                counter = 0
                 for j in range(neur_c):
                     if (i^j) and (j>=inputs) and (i<=neur_c-1-outputs):
                         c = Connection(r.random()*2-1, i, j)
                         connections.append(c)
-                        counter += 1
-                info_table.append(counter)
+
+            for c in connections:
+                counter[c.end] += 1
+            
+            info_table = b""
+            offset = 0
+            for g in counter:
+                info_table += sct.pack("<IHxx", offset, g)
+                offset += g
 
             data1 = bytearray()
             data2 = bytearray()
@@ -339,15 +346,16 @@ if _GPUACCEL:
             self.inner_offs = inputs
             self.neurons_d = np.array(list(data1), dtype=np.uint8)
             self.connections_d = np.array(list(data2), dtype=np.uint8)
-            self.c_info = np.array(info_table, np.ushort)
+            self.c_info = np.array(list(info_table), np.uint8)
+            print(list(info_table))
             self.good = 0
             self.last_good = 0
 
             self.queue = _gpu_queue
             self.n_buff = cl.Buffer(_gpu_context, mf.READ_WRITE|mf.COPY_HOST_PTR, hostbuf=self.neurons_d) #Neurons data list
             self.c_buff = cl.Buffer(_gpu_context, mf.READ_WRITE|mf.COPY_HOST_PTR, hostbuf=self.connections_d) #Connections data list
-            self.ci_buff = cl.Buffer(_gpu_context, mf.READ_ONLY|mf.COPY_HOST_PTR, hostbuf=self.c_info) #Connections count per neuron list
-            self.ps_buff = cl.Buffer(_gpu_context, mf.READ_WRITE, self.con_count*4) #Pre in_d state
+            self.ci_buff = cl.Buffer(_gpu_context, mf.READ_WRITE|mf.COPY_HOST_PTR, hostbuf=self.c_info) #Connections count per neuron list
+            self.ps_buff = cl.Buffer(_gpu_context, mf.READ_WRITE, self.c*(self.c-1)*4) #Pre in_d state
 
         def copy(self):
             o = GPU_Brain(0)
@@ -367,7 +375,7 @@ if _GPUACCEL:
             o.n_buff = cl.Buffer(_gpu_context, mf.READ_WRITE|mf.COPY_HOST_PTR, hostbuf=o.neurons_d)
             o.c_buff = cl.Buffer(_gpu_context, mf.READ_WRITE|mf.COPY_HOST_PTR, hostbuf=o.connections_d)
             o.ci_buff = cl.Buffer(_gpu_context, mf.READ_ONLY|mf.COPY_HOST_PTR, hostbuf=o.c_info)
-            o.ps_buff = cl.Buffer(_gpu_context, mf.READ_WRITE, o.con_count*4)
+            o.ps_buff = cl.Buffer(_gpu_context, mf.READ_WRITE, o.c*(o.c-1)*4)
             return o
 
         def update(self):
@@ -422,6 +430,11 @@ if _GPUACCEL:
                 self.neurons_d[inp*16:inp*16+16] = np.array(list(data), np.uint8)
             cl.enqueue_copy(self.queue, self.n_buff, self.neurons_d)
 
+        def Reset(self):
+            _gpu_functs.ResetC(self.queue, (self.con_count,), None, self.c_buff)
+            _gpu_functs.ResetN(self.queue, (self.c,), None, self.n_buff)
+            cl.enqueue_copy(self.queue, self.connections_d, self.c_buff)
+            cl.enqueue_copy(self.queue, self.neurons_d, self.n_buff)
 
 '''test = np.ndarray((1000,), np.float32)
 test_buff = cl.Buffer(_gpu_context, mf.READ_WRITE, test.nbytes)
@@ -437,8 +450,9 @@ if __name__ == "__main__":
     outp = 5
     count = 256
 
-    brain = GPU_Brain(inp+outp+1+count, inp, outp, linear) #Initializing Brain with 60 inner neurons, 100 inputs and 5 outputs + 1 good neuron
+    brain = GPU_Brain(inp+outp+1+count, inp, outp, sigmoid) #Initializing Brain with 60 inner neurons, 100 inputs and 5 outputs + 1 good neuron
     brain.Mutate(0.5) #Randomly change the Brain
+    brain.Reset()
 
     #Save test
     '''with open("test_save.NN", "wb") as f:
