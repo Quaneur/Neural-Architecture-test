@@ -83,17 +83,35 @@ __kernel void MutateN(__global struct neuron* ners, const unsigned long seed, co
 	return;
 }
 
-__kernel void Update1(__global struct connection* cons, __global struct neuron* ners) {
-	// Step 1 - Set neurons prestates and first update of connections.
+__kernel void Update1(__global struct connection* cons, __global struct neuron* ners, __global float* prestate) {
+	// Step 1 - Set neurons input prestates and first update of connections.
 	unsigned long i = get_global_id(0);
 	struct connection c = cons[i];
-	atomic_add(ners[c.n_id], ners[c.b_id].state * c.mult);
-	atomic_add(ners[c.n_id].c, 1);
+	prestate[i] = ners[c.b_id].state * c.mult;
 	cons[i].acc = cons[i].acc * cons[i].accoof + ners[c.b_id].state * 0.1f;
 };
 
-__kernel void Update2(__global struct neuron* ners) {
-	// Step 2 - Update neurons state.
+__kernel void Update2(__global float* prestate, __global unsigned short* compute_counts, __global struct neuron* ners) {
+	//Step 2 - Neuron's input summary
+	unsigned short i = get_global_id(0);
+	unsigned long offset;
+	__local unsigned short check;
+	offset = 0;
+	check = 0;
+	for (unsigned short j = 0; j < i; j++) { // Getting data offset
+		offset += compute_counts[j];
+		check++;
+	}
+	//printf("core_%u: offset:%u steps:%u\n", i, offset, check);
+	float out = 0.0f;
+	for (unsigned short q = 0; q < compute_counts[i]; q++) {
+		out += prestate[offset + q]; // Computing neuron in_d
+	}
+	ners[i].in_d = out;
+}
+
+__kernel void Update3(__global struct neuron* ners) {
+	// Step 3 - Update neurons state.
 	unsigned short i = get_global_id(0);
 	struct neuron n = ners[i];
 	if ((n.cdata & 3) == 1) {
@@ -119,8 +137,8 @@ __kernel void Update2(__global struct neuron* ners) {
 	ners[i].c = 0;
 };
 
-__kernel void Update3(__global struct connection* cons, const float g_coof) {
-	// Step 3 - Update connections based on good coefficient.
+__kernel void Update4(__global struct connection* cons, const float g_coof) {
+	// Step 4 - Update connections based on good coefficient.
 	unsigned long i = get_global_id(0);
 	float premul = cons[i].mult + (sign(cons[i].mult) * (cons[i].acc * g_coof));
 	float omul = 1.0f + log10(premul) / 2.0f;
@@ -130,6 +148,7 @@ __kernel void Update3(__global struct connection* cons, const float g_coof) {
 }
 
 __kernel void GenRand(__global float* rt, const ulong seed) {
+	// Not using function. Need for checking random function.
 	unsigned long long maxui = 0xFFFFFFFFFFFFFFFF;
 	unsigned long long i = get_global_id(0);
 	//unsigned long long s_s = seed + (j + j ^ (j << 4)); //pseudo-randomizing seed before random function

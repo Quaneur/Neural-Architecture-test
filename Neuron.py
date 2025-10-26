@@ -301,6 +301,7 @@ if _GPUACCEL:
             connections = []
             input_n = []
             output_n = []
+            info_table = []
             neur_c = neur_c+1
             outputs = outputs+1
             for i in range(neur_c):
@@ -315,10 +316,13 @@ if _GPUACCEL:
                 n.act_funct = sigmoid
                 n.id = i
                 neurons.append(n)
+                counter = 0
                 for j in range(neur_c):
                     if (i^j) and (j>=inputs) and (i<=neur_c-1-outputs):
                         c = Connection(r.random()*2-1, i, j)
                         connections.append(c)
+                        counter += 1
+                info_table.append(counter)
 
             data1 = bytearray()
             data2 = bytearray()
@@ -335,12 +339,15 @@ if _GPUACCEL:
             self.inner_offs = inputs
             self.neurons_d = np.array(list(data1), dtype=np.uint8)
             self.connections_d = np.array(list(data2), dtype=np.uint8)
+            self.c_info = np.array(info_table, np.ushort)
             self.good = 0
             self.last_good = 0
 
             self.queue = _gpu_queue
-            self.n_buff = cl.Buffer(_gpu_context, mf.READ_WRITE|mf.COPY_HOST_PTR, hostbuf=self.neurons_d)
-            self.c_buff = cl.Buffer(_gpu_context, mf.READ_WRITE|mf.COPY_HOST_PTR, hostbuf=self.connections_d)
+            self.n_buff = cl.Buffer(_gpu_context, mf.READ_WRITE|mf.COPY_HOST_PTR, hostbuf=self.neurons_d) #Neurons data list
+            self.c_buff = cl.Buffer(_gpu_context, mf.READ_WRITE|mf.COPY_HOST_PTR, hostbuf=self.connections_d) #Connections data list
+            self.ci_buff = cl.Buffer(_gpu_context, mf.READ_ONLY|mf.COPY_HOST_PTR, hostbuf=self.c_info) #Connections count per neuron list
+            self.ps_buff = cl.Buffer(_gpu_context, mf.READ_WRITE, self.con_count*4) #Pre in_d state
 
         def copy(self):
             o = GPU_Brain(0)
@@ -354,15 +361,19 @@ if _GPUACCEL:
             o.con_count = self.con_count
             o.neurons_d = self.neurons_d.copy()
             o.connections_d = self.coonections_d.copy()
+            o.c_info = self.c_info.copy()
 
             o.queue = self.queue
             o.n_buff = cl.Buffer(_gpu_context, mf.READ_WRITE|mf.COPY_HOST_PTR, hostbuf=o.neurons_d)
             o.c_buff = cl.Buffer(_gpu_context, mf.READ_WRITE|mf.COPY_HOST_PTR, hostbuf=o.connections_d)
+            o.ci_buff = cl.Buffer(_gpu_context, mf.READ_ONLY|mf.COPY_HOST_PTR, hostbuf=o.c_info)
+            o.ps_buff = cl.Buffer(_gpu_context, mf.READ_WRITE, o.con_count*4)
             return o
 
         def update(self):
-            _gpu_functs.Update1(self.queue, (self.con_count,), None, self.c_buff, self.n_buff)
-            _gpu_functs.Update2(self.queue, (self.c,), None, self.n_buff)
+            _gpu_functs.Update1(self.queue, (self.con_count,), None, self.c_buff, self.n_buff, self.ps_buff)
+            _gpu_functs.Update2(self.queue, (self.c,), None, self.ps_buff, self.ci_buff, self.n_buff)
+            _gpu_functs.Update3(self.queue, (self.c,), None, self.n_buff)
             cl.enqueue_copy(self.queue, self.neurons_d, self.n_buff)
             goodn = Neuron()
             n_data = bytes(list(self.neurons_d[self.out_offs*16:self.out_offs*16+16]))
@@ -370,14 +381,14 @@ if _GPUACCEL:
             self.last_good = self.good
             self.good = self.good*0.995+goodn.state*0.005
             delta = (self.good-self.last_good)*250
-            _gpu_functs.Update3(self.queue, (self.con_count,), None, self.c_buff, np.float32(delta))
+            _gpu_functs.Update4(self.queue, (self.con_count,), None, self.c_buff, np.float32(delta))
             cl.enqueue_copy(self.queue, self.connections_d, self.c_buff)
 
         def Mutate(self, coof):
             brgn = r.getrandbits(64)
-            _gpu_mutate_c(self.queue, (self.con_count,), None, self.c_buff, np.uint64(brgn), np.float32(coof))
+            _gpu_functs.MutateC(self.queue, (self.con_count,), None, self.c_buff, np.uint64(brgn), np.float32(coof))
             ergn = r.getrandbits(64)
-            _gpu_mutate_n(self.queue, (self.c,), None, self.n_buff, np.ulonglong(ergn), np.float32(coof))
+            _gpu_functs.MutateN(self.queue, (self.c,), None, self.n_buff, np.ulonglong(ergn), np.float32(coof))
                                 
         def GetState(self):
             '''Get current state'''
@@ -427,7 +438,7 @@ if __name__ == "__main__":
     count = 256
 
     brain = GPU_Brain(inp+outp+1+count, inp, outp, linear) #Initializing Brain with 60 inner neurons, 100 inputs and 5 outputs + 1 good neuron
-    #brain.Mutate(0.5) #Randomly change the Brain
+    brain.Mutate(0.5) #Randomly change the Brain
 
     #Save test
     '''with open("test_save.NN", "wb") as f:
