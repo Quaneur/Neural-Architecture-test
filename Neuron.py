@@ -3,6 +3,34 @@ import math
 import time
 import struct as sct
 import random as r
+try:
+    import os
+    os.environ["PYOPENCL_CTX"] = "0"
+    os.environ["PYOPENCL_COMPILER_OUTPUT"] = "1"
+    os.environ["PYOPENCL_NO_CASHE"] = "1"
+    del os
+    import numpy as np
+    import pyopencl as cl
+    _GPUACCEL = True
+    with open("GPU.cpp", "r") as f:
+        _gpu_soft = f.read()
+    _gpu_context = cl.create_some_context()
+    _gpu_queue = cl.CommandQueue(_gpu_context)
+    _gpu_functs =   cl.Program(_gpu_context, _gpu_soft).build()
+    _gpu_update1 =  cl.Kernel(_gpu_functs, "Update1")
+    _gpu_update2 =  cl.Kernel(_gpu_functs, "Update2")
+    _gpu_update3 =  cl.Kernel(_gpu_functs, "Update3")
+    _gpu_update4 =  cl.Kernel(_gpu_functs, "Update4")
+    _gpu_mutate_c = cl.Kernel(_gpu_functs, "MutateC")
+    _gpu_mutate_n = cl.Kernel(_gpu_functs, "MutateN")
+    _gpu_random =   cl.Kernel(_gpu_functs, "GenRand")
+    _gpu_reset_c =  cl.Kernel(_gpu_functs, "ResetC")
+    _gpu_reset_n =  cl.Kernel(_gpu_functs, "ResetN")
+    mf = cl.mem_flags
+
+except ModuleNotFoundError as e:
+    print(f"<{__name__}> |WARNING: 'pyopencl' library is not found. GPU software acceleration is disabled.\n|Install this library for using GPU acceleration.")
+    _GPUACCEL = False
 
 def sigmoid(x, c):
     '''Sigmoid function'''
@@ -63,6 +91,26 @@ class Neuron:
         data = sct.pack("<HfBB", self.id, self.state, self.type, 0)
         return data
 
+    if _GPUACCEL:
+        def to_np_bytes(self):
+            _t = [linear, relu, softrelu, sigmoid]
+            c = _t.index(self.act_funct)
+            j = (self.type&3)|((c<<2)&15)
+            data = sct.pack("<HBxffHxx", self.id, j, self.in_d, self.state, self.c)
+            return data
+        pass
+
+        def from_np_bytes(self, data):
+            _t = [linear, relu, softrelu, sigmoid]
+            l = sct.unpack("<HBxffHxx", data)
+            self.id = l[0]
+            self.type = l[1]&3
+            self.act_funct = _t[(l[1]>>2)&15]
+            self.in_d = l[2]
+            self.state = l[3]
+            self.c = l[4]
+
+
     def from_bytes(self, data):
         '''Bytes to Neuron convertation'''
         b = sct.unpack("<HfBB", data)
@@ -85,7 +133,7 @@ class Neuron:
 class Brain:
     '''The main brain class.
 Initialize: Brain([summary_n_count], [n_input_count], [n_output_count])'''
-    def __init__(self, neur_c, inputs = 0, outputs = 0):
+    def __init__(self, neur_c, inputs = 0, outputs = 0, act_funct=sigmoid):
         neurons = []
         connections = []
         input_n = []
@@ -94,6 +142,7 @@ Initialize: Brain([summary_n_count], [n_input_count], [n_output_count])'''
         outputs = outputs+1
         for i in range(neur_c):
             n = Neuron()
+            n.act_funct = act_funct
             if i < inputs:
                 n.type = 1
                 input_n.append(n)
@@ -247,26 +296,176 @@ Input data - number list that >= count of input neurons'''
         for c in self.connections:
             c.Mutate(coof)
 
+if _GPUACCEL:
+    class GPU_Brain:
+        '''The main Brain class. Working on GPU'''
+        def __init__(self, neur_c, inputs = 0, outputs = 0, act_funct=sigmoid):
+            neurons = []
+            connections = []
+            input_n = []
+            output_n = []
+            info_table = b""
+            neur_c = neur_c+1
+            outputs = outputs+1
+            counter = [0 for _ in range(neur_c)]
+            for i in range(neur_c):
+                n = Neuron()
+                n.act_funct = act_funct
+                if i < inputs:
+                    n.type = 1
+                    input_n.append(n)
+                elif i > neur_c-1-outputs:
+                    n.type = 2
+                    output_n.append(n)
+                n.act_funct = sigmoid
+                n.id = i
+                neurons.append(n)
+                for j in range(neur_c):
+                    if (i^j) and (j>=inputs) and (i<=neur_c-1-outputs):
+                        c = Connection(r.random()*2-1, i, j)
+                        connections.append(c)
+
+            for c in connections:
+                counter[c.end] += 1
+            
+            info_table = b""
+            offset = 0
+            for g in counter:
+                info_table += sct.pack("<IHxx", offset, g)
+                offset += g
+
+            data1 = bytearray()
+            data2 = bytearray()
+            for n in neurons:
+                data1 += n.to_np_bytes()
+            for c in connections:
+                data2 += c.to_bytes()
+
+            self.c = neur_c
+            self.inputs = inputs
+            self.outputs = outputs
+            self.con_count = len(connections)
+            self.out_offs = neur_c-outputs
+            self.inner_offs = inputs
+            self.neurons_d = np.array(list(data1), dtype=np.uint8)
+            self.connections_d = np.array(list(data2), dtype=np.uint8)
+            self.c_info = np.array(list(info_table), np.uint8)
+            self.good = 0
+            self.last_good = 0
+
+            self.queue = _gpu_queue
+            self.n_buff = cl.Buffer(_gpu_context, mf.READ_WRITE|mf.COPY_HOST_PTR, hostbuf=self.neurons_d) #Neurons data list
+            self.c_buff = cl.Buffer(_gpu_context, mf.READ_WRITE|mf.COPY_HOST_PTR, hostbuf=self.connections_d) #Connections data list
+            self.ci_buff = cl.Buffer(_gpu_context, mf.READ_WRITE|mf.COPY_HOST_PTR, hostbuf=self.c_info) #Connections count per neuron list
+            self.ps_buff = cl.Buffer(_gpu_context, mf.READ_WRITE, self.con_count*4) #Pre in_d state
+
+        def copy(self):
+            '''Clone the brain'''
+            o = GPU_Brain(0)
+            o.c = self.c
+            o.input_n = self.input_n
+            o.output_n = self.output_n
+            o.out_offs = self.out_offs
+            o.inner_offs = self.inner_offs
+            o.good = self.good
+            o.last_good = self.last_good
+            o.con_count = self.con_count
+            o.neurons_d = self.neurons_d.copy()
+            o.connections_d = self.coonections_d.copy()
+            o.c_info = self.c_info.copy()
+
+            o.queue = self.queue
+            o.n_buff = cl.Buffer(_gpu_context, mf.READ_WRITE|mf.COPY_HOST_PTR, hostbuf=o.neurons_d)
+            o.c_buff = cl.Buffer(_gpu_context, mf.READ_WRITE|mf.COPY_HOST_PTR, hostbuf=o.connections_d)
+            o.ci_buff = cl.Buffer(_gpu_context, mf.READ_ONLY|mf.COPY_HOST_PTR, hostbuf=o.c_info)
+            o.ps_buff = cl.Buffer(_gpu_context, mf.READ_WRITE, o.con_count*4)
+            return o
+
+        def update(self):
+            '''Update the brain state'''
+            _gpu_update1(self.queue, (self.con_count,), None, self.c_buff, self.n_buff, self.ps_buff)
+            _gpu_update2(self.queue, (self.c,), None, self.ps_buff, self.ci_buff, self.n_buff)
+            _gpu_update3(self.queue, (self.c,), None, self.n_buff)
+            cl.enqueue_copy(self.queue, self.neurons_d, self.n_buff)
+            goodn = Neuron()
+            n_data = bytes(list(self.neurons_d[self.out_offs*16:self.out_offs*16+16]))
+            goodn.from_np_bytes(n_data)
+            self.last_good = self.good
+            self.good = self.good*0.995+goodn.state*0.005
+            delta = (self.good-self.last_good)*250
+            _gpu_update4(self.queue, (self.con_count,), None, self.c_buff, np.float32(delta))
+            cl.enqueue_copy(self.queue, self.connections_d, self.c_buff)
+
+        def Mutate(self, coof):
+            '''Make some mutations in brain'''
+            brgn = r.getrandbits(64)
+            _gpu_mutate_c(self.queue, (self.con_count,), None, self.c_buff, np.uint64(brgn), np.float32(coof))
+            ergn = r.getrandbits(64)
+            _gpu_mutate_n(self.queue, (self.c,), None, self.n_buff, np.ulonglong(ergn), np.float32(coof))
+                                
+        def GetState(self):
+            '''Get current state'''
+            res = []
+            for offs in range(0, self.neurons_d.nbytes, 16):
+                n = Neuron()
+                n.from_np_bytes(bytes(list(self.neurons_d[offs:offs+16])))
+                res.append(n.state)
+                del n
+            return res
+
+        def getOutput(self):
+            '''Get Brain's outputs'''
+            res = []
+            for offs in range(self.out_offs+16, self.neurons_d.nbytes, 16):
+                n = Neuron()
+                n.from_np_bytes(bytes(list(self.neurons_d[offs:offs+16])))
+                res.append(n.state)
+                del n
+            return res
+
+        def setInput(self, inputs):
+            '''Set brain's inputs'''
+            if len(inputs) < self.inputs:
+                raise TypeError(f"Input data less than needed ({len(inputs)}<{self.inputs})")
+            cl.enqueue_copy(self.queue, self.neurons_d, self.n_buff)
+            for inp in range(self.inputs):
+                data = self.neurons_d[inp*16:inp*16+16]
+                n = Neuron()
+                n.from_np_bytes(bytes(list(data)))
+                n.state = inputs[inp]
+                data = n.to_np_bytes()
+                self.neurons_d[inp*16:inp*16+16] = np.array(list(data), np.uint8)
+            cl.enqueue_copy(self.queue, self.n_buff, self.neurons_d)
+
+        def Reset(self):
+            '''Reset brain state'''
+            _gpu_reset_c(self.queue, (self.con_count,), None, self.c_buff)
+            _gpu_reset_n(self.queue, (self.c,), None, self.n_buff)
+            cl.enqueue_copy(self.queue, self.connections_d, self.c_buff)
+            cl.enqueue_copy(self.queue, self.neurons_d, self.n_buff)
+
+
 '''Basic perfomance and functions test.'''
 if __name__ == "__main__":
     from PIL import Image
-    inp = 100
+    inp = 5
     outp = 5
-    count = 60
+    count = 1024
 
-    brain = Brain(inp+outp+1+count, inp, outp) #Initializing Brain with 60 inner neurons, 100 inputs and 5 outputs + 1 good neuron
+    brain = GPU_Brain(inp+outp+1+count, inp, outp, sigmoid) #Initializing Brain with 60 inner neurons, 100 inputs and 5 outputs + 1 good neuron
     brain.Mutate(0.5) #Randomly change the Brain
+    brain.Reset()
 
-    #Save test
-    with open("test_save.NN", "wb") as f:
+    #Save test (Not work in GPU)
+    '''with open("test_save.NN", "wb") as f:
         data = brain.to_bytes()
-        f.write(data)
+        f.write(data)'''
 
     #Clone speed perfomance
-    s_clone = time.time()
+    '''s_clone = time.time()
     cloned = brain.Clone()
     clone_t = time.time()-s_clone
-    print(f"Clone speed:{clone_t*1000}ms")
+    print(f"Clone speed:{clone_t*1000}ms")'''
 
     #Brain work test
     step = 0
@@ -279,7 +478,7 @@ if __name__ == "__main__":
         for i in range(4096*4):
             print(f"Step:{i+1}")
 
-            brain.setInput([r.random() for _ in range(100)]) #Setting some inputs
+            brain.setInput([r.random() for _ in range(5)]) #Setting some inputs
             brain.update() #Updating the brain state
             print(f"GoodCoof: {brain.good}")
             d = brain.GetState() #Getting neurons state (for image graph)
@@ -294,12 +493,11 @@ if __name__ == "__main__":
     #Saving brain activity history
     img = Image.new("RGB", (len(history[0]), len(history)))
     p = 0
-    print(brain.output_n[0].id)
     l1 = len(history[0])
     for d in history:
         
         step = history.index(d)
         for n in d:
-            img.putpixel((p%l1, p//l1), (max(0, min(round(50*((p%l1<inp)or(p%l1==brain.output_n[0].id))+205*n*((p%l1<inp)or(p%l1==brain.output_n[0].id))), 255)), max(0, min(round(50*((l1-outp>p%l1>=inp))+205*n*((l1-outp>p%l1>=inp))), 255)), max(0, min(round(50*(l1-outp<=p%l1)+205*n*(l1-outp<=p%l1)), 255))))
+            img.putpixel((p%l1, p//l1), (max(0, min(round(50*((p%l1<inp)or(p%l1==brain.c-brain.outputs))+205*n*((p%l1<inp)or(p%l1==brain.c-brain.outputs))), 255)), max(0, min(round(50*((l1-outp>p%l1>=inp))+205*n*((l1-outp>p%l1>=inp))), 255)), max(0, min(round(50*(l1-outp<=p%l1)+205*n*(l1-outp<=p%l1)), 255))))
             p+=1
     img.save("hm.png")
