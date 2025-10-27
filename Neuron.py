@@ -14,16 +14,18 @@ try:
     _GPUACCEL = True
     with open("GPU.cpp", "r") as f:
         _gpu_soft = f.read()
-        print(_gpu_soft)
     _gpu_context = cl.create_some_context()
     _gpu_queue = cl.CommandQueue(_gpu_context)
-    _gpu_functs = cl.Program(_gpu_context, _gpu_soft).build()
-    '''_gpu_update1 = _gpu_functs.Update1#cl.Kernel(_gpu_functs, "Update1")
-    _gpu_update2 = _gpu_functs.Update2#cl.Kernel(_gpu_functs, "Update2")
-    _gpu_update3 = _gpu_functs.Update3#cl.Kernel(_gpu_functs, "Update3")
-    _gpu_mutate_c =_gpu_functs.MutateC# cl.Kernel(_gpu_functs, "MutateC")
-    _gpu_mutate_n =_gpu_functs.MutateN# cl.Kernel(_gpu_functs, "MutateN")
-    _gpu_random =  _gpu_functs.GenRand# cl.Kernel(_gpu_functs, "GenRand")'''
+    _gpu_functs =   cl.Program(_gpu_context, _gpu_soft).build()
+    _gpu_update1 =  cl.Kernel(_gpu_functs, "Update1")
+    _gpu_update2 =  cl.Kernel(_gpu_functs, "Update2")
+    _gpu_update3 =  cl.Kernel(_gpu_functs, "Update3")
+    _gpu_update4 =  cl.Kernel(_gpu_functs, "Update4")
+    _gpu_mutate_c = cl.Kernel(_gpu_functs, "MutateC")
+    _gpu_mutate_n = cl.Kernel(_gpu_functs, "MutateN")
+    _gpu_random =   cl.Kernel(_gpu_functs, "GenRand")
+    _gpu_reset_c =  cl.Kernel(_gpu_functs, "ResetC")
+    _gpu_reset_n =  cl.Kernel(_gpu_functs, "ResetN")
     mf = cl.mem_flags
 
 except ModuleNotFoundError as e:
@@ -296,6 +298,7 @@ Input data - number list that >= count of input neurons'''
 
 if _GPUACCEL:
     class GPU_Brain:
+        '''The main Brain class. Working on GPU'''
         def __init__(self, neur_c, inputs = 0, outputs = 0, act_funct=sigmoid):
             neurons = []
             connections = []
@@ -347,7 +350,6 @@ if _GPUACCEL:
             self.neurons_d = np.array(list(data1), dtype=np.uint8)
             self.connections_d = np.array(list(data2), dtype=np.uint8)
             self.c_info = np.array(list(info_table), np.uint8)
-            print(list(info_table))
             self.good = 0
             self.last_good = 0
 
@@ -355,9 +357,10 @@ if _GPUACCEL:
             self.n_buff = cl.Buffer(_gpu_context, mf.READ_WRITE|mf.COPY_HOST_PTR, hostbuf=self.neurons_d) #Neurons data list
             self.c_buff = cl.Buffer(_gpu_context, mf.READ_WRITE|mf.COPY_HOST_PTR, hostbuf=self.connections_d) #Connections data list
             self.ci_buff = cl.Buffer(_gpu_context, mf.READ_WRITE|mf.COPY_HOST_PTR, hostbuf=self.c_info) #Connections count per neuron list
-            self.ps_buff = cl.Buffer(_gpu_context, mf.READ_WRITE, self.c*(self.c-1)*4) #Pre in_d state
+            self.ps_buff = cl.Buffer(_gpu_context, mf.READ_WRITE, self.con_count*4) #Pre in_d state
 
         def copy(self):
+            '''Clone the brain'''
             o = GPU_Brain(0)
             o.c = self.c
             o.input_n = self.input_n
@@ -375,13 +378,14 @@ if _GPUACCEL:
             o.n_buff = cl.Buffer(_gpu_context, mf.READ_WRITE|mf.COPY_HOST_PTR, hostbuf=o.neurons_d)
             o.c_buff = cl.Buffer(_gpu_context, mf.READ_WRITE|mf.COPY_HOST_PTR, hostbuf=o.connections_d)
             o.ci_buff = cl.Buffer(_gpu_context, mf.READ_ONLY|mf.COPY_HOST_PTR, hostbuf=o.c_info)
-            o.ps_buff = cl.Buffer(_gpu_context, mf.READ_WRITE, o.c*(o.c-1)*4)
+            o.ps_buff = cl.Buffer(_gpu_context, mf.READ_WRITE, o.con_count*4)
             return o
 
         def update(self):
-            _gpu_functs.Update1(self.queue, (self.con_count,), None, self.c_buff, self.n_buff, self.ps_buff)
-            _gpu_functs.Update2(self.queue, (self.c,), None, self.ps_buff, self.ci_buff, self.n_buff)
-            _gpu_functs.Update3(self.queue, (self.c,), None, self.n_buff)
+            '''Update the brain state'''
+            _gpu_update1(self.queue, (self.con_count,), None, self.c_buff, self.n_buff, self.ps_buff)
+            _gpu_update2(self.queue, (self.c,), None, self.ps_buff, self.ci_buff, self.n_buff)
+            _gpu_update3(self.queue, (self.c,), None, self.n_buff)
             cl.enqueue_copy(self.queue, self.neurons_d, self.n_buff)
             goodn = Neuron()
             n_data = bytes(list(self.neurons_d[self.out_offs*16:self.out_offs*16+16]))
@@ -389,14 +393,15 @@ if _GPUACCEL:
             self.last_good = self.good
             self.good = self.good*0.995+goodn.state*0.005
             delta = (self.good-self.last_good)*250
-            _gpu_functs.Update4(self.queue, (self.con_count,), None, self.c_buff, np.float32(delta))
+            _gpu_update4(self.queue, (self.con_count,), None, self.c_buff, np.float32(delta))
             cl.enqueue_copy(self.queue, self.connections_d, self.c_buff)
 
         def Mutate(self, coof):
+            '''Make some mutations in brain'''
             brgn = r.getrandbits(64)
-            _gpu_functs.MutateC(self.queue, (self.con_count,), None, self.c_buff, np.uint64(brgn), np.float32(coof))
+            _gpu_mutate_c(self.queue, (self.con_count,), None, self.c_buff, np.uint64(brgn), np.float32(coof))
             ergn = r.getrandbits(64)
-            _gpu_functs.MutateN(self.queue, (self.c,), None, self.n_buff, np.ulonglong(ergn), np.float32(coof))
+            _gpu_mutate_n(self.queue, (self.c,), None, self.n_buff, np.ulonglong(ergn), np.float32(coof))
                                 
         def GetState(self):
             '''Get current state'''
@@ -409,6 +414,7 @@ if _GPUACCEL:
             return res
 
         def getOutput(self):
+            '''Get Brain's outputs'''
             res = []
             for offs in range(self.out_offs+16, self.neurons_d.nbytes, 16):
                 n = Neuron()
@@ -418,6 +424,7 @@ if _GPUACCEL:
             return res
 
         def setInput(self, inputs):
+            '''Set brain's inputs'''
             if len(inputs) < self.inputs:
                 raise TypeError(f"Input data less than needed ({len(inputs)}<{self.inputs})")
             cl.enqueue_copy(self.queue, self.neurons_d, self.n_buff)
@@ -431,18 +438,13 @@ if _GPUACCEL:
             cl.enqueue_copy(self.queue, self.n_buff, self.neurons_d)
 
         def Reset(self):
-            _gpu_functs.ResetC(self.queue, (self.con_count,), None, self.c_buff)
-            _gpu_functs.ResetN(self.queue, (self.c,), None, self.n_buff)
+            '''Reset brain state'''
+            _gpu_reset_c(self.queue, (self.con_count,), None, self.c_buff)
+            _gpu_reset_n(self.queue, (self.c,), None, self.n_buff)
             cl.enqueue_copy(self.queue, self.connections_d, self.c_buff)
             cl.enqueue_copy(self.queue, self.neurons_d, self.n_buff)
 
-'''test = np.ndarray((1000,), np.float32)
-test_buff = cl.Buffer(_gpu_context, mf.READ_WRITE, test.nbytes)
-seed = r.getrandbits(64)
-_gpu_functs.GenRand(_gpu_queue, (1000,), None, test_buff, np.ulonglong(seed))
-cl.enqueue_copy(_gpu_queue, test, test_buff)
-print(test)
-exit()'''
+
 '''Basic perfomance and functions test.'''
 if __name__ == "__main__":
     from PIL import Image
@@ -454,7 +456,7 @@ if __name__ == "__main__":
     brain.Mutate(0.5) #Randomly change the Brain
     brain.Reset()
 
-    #Save test
+    #Save test (Not work in GPU)
     '''with open("test_save.NN", "wb") as f:
         data = brain.to_bytes()
         f.write(data)'''
