@@ -8,7 +8,7 @@ Just simple test library of neural architecture with dynamic weights on Python (
 
 Just add this files into your project and import `Neurons.py` in your executable.
 
-For using GPU acceleration, you need to has installed `pyopencl` library and instead `Brain` class use `GPU_Brain`.
+For using GPU acceleration, you need to has installed `pyopencl` and `numpy` library. Also instead `Brain` class use `GPU_Brain`.
 
 Saving for `GPU_Brain` is not working now.
 
