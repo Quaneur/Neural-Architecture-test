@@ -1,4 +1,4 @@
-# Neural-Architecture-test
+# NeurDynamic-lib
 
 Just simple test library of neural architecture with dynamic weights on Python (Still in work)
 
