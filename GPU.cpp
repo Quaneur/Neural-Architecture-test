@@ -105,7 +105,7 @@ __kernel void Update1(__global struct connection* cons, __global struct neuron* 
 	unsigned long i = get_global_id(0);
 	struct connection c = cons[i];
 	prestate[i] = ners[c.b_id].state * c.mult;
-	cons[i].acc = cons[i].acc * cons[i].accoof + ners[c.b_id].state * 0.1f;
+	cons[i].acc = (cons[i].acc * cons[i].accoof) + (ners[c.b_id].state * 0.1f);
 };
 
 __kernel void Update2(__global float* prestate, __global struct INFO_D* c_c, __global struct neuron* ners) {
@@ -155,7 +155,7 @@ __kernel void Update4(__global struct connection* cons, const float g_coof) {
 	// Step 4 - Update connections based on good coefficient.
 	unsigned long i = get_global_id(0);
 	float premul = cons[i].mult + (sign(cons[i].mult) * (cons[i].acc * g_coof));
-	float omul = 1.0f + log10(premul) / 2.0f;
+	float omul = premul/(1.0f + log10(fabs(premul)) / 2.0f);
 	if (!isnan(omul)) {
 		cons[i].mult = omul;
 	}

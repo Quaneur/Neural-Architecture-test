@@ -448,7 +448,7 @@ if __name__ == "__main__":
     from PIL import Image
     inp = 5
     outp = 5
-    count = 256
+    count = 1024
 
     brain = GPU_Brain(inp+outp+1+count, inp, outp, sigmoid) #Initializing Brain with 60 inner neurons, 100 inputs and 5 outputs + 1 good neuron
     brain.Mutate(0.5) #Randomly change the Brain
